@@ -554,17 +554,23 @@ class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer {
     const currentZoom = frameState.viewState.zoom;
 
     if (this.shouldUseFiltering_) {
-      if (currentZoom < maxZoom / 4) {
-        featuresToRender = this.filteredFeatures30k_;
-        console.log(`🎯 Rendering 30k filtered features (zoom: ${currentZoom.toFixed(2)}/${maxZoom})`);
-      } else if (currentZoom < maxZoom / 2) {
+      // if (currentZoom < maxZoom / 4) {
+      //   featuresToRender = this.filteredFeatures30k_;
+      //   console.log(`🎯 Rendering 30k filtered features (zoom: ${currentZoom.toFixed(2)}/${maxZoom})`);
+      if (currentZoom < maxZoom / 3) {
         featuresToRender = this.filteredFeatures50k_;
         console.log(`🎯 Rendering 50k filtered features (zoom: ${currentZoom.toFixed(2)}/${maxZoom})`);
-      } else if (currentZoom < (maxZoom * 3) / 4) {
+      } else if (currentZoom < (maxZoom * 2) / 3) {
         featuresToRender = this.filteredFeatures100k_;
         console.log(`🎯 Rendering 100k filtered features (zoom: ${currentZoom.toFixed(2)}/${maxZoom})`);
       } else {
-        featuresToRender = vectorSource.getFeatures();
+        // Add 50% buffer to extent for pre-rendering
+        const width = frameState.extent[2] - frameState.extent[0];
+        const height = frameState.extent[3] - frameState.extent[1];
+        const extent = [frameState.extent[0] - width * 0.5, frameState.extent[1] - height * 0.5, frameState.extent[2] + width * 0.5, frameState.extent[3] + height * 0.5];
+
+        // Get features in viewport+buffer extent
+        featuresToRender = vectorSource.getFeaturesInExtent(extent);
         console.log(`🎯 Rendering all ${featuresToRender.length} features (zoom: ${currentZoom.toFixed(2)}/${maxZoom})`);
       }
 
