@@ -196,6 +196,16 @@ declare class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer<any> {
      */
     private previousZoom_;
     /**
+     * @private
+     * @type {number}
+     */
+    private fixedCount_;
+    /**
+     * @private
+     * @type {number}
+     */
+    private pendingFrame_;
+    /**
      * Initialize and cache maxZoom from the map's view (called once)
      * Sets this.maxZoom_ property
      * @private

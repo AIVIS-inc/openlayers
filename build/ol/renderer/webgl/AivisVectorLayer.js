@@ -224,6 +224,18 @@ class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer {
      * @type {number}
      */
     this.previousZoom_ = -1;
+
+    /**
+     * @private
+     * @type {number}
+     */
+    this.fixedCount_ = 0;
+
+    /**
+     * @private
+     * @type {number}
+     */
+    this.pendingFrame_ = 10;
   }
 
   /**
@@ -524,11 +536,20 @@ class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer {
       if (isViewPortMoving) {
         this.previousExtent_ = currentExtent;
         this.getLayer().changed();
+        this.fixedCount_ = 0;
         return true;
       } else if (equals(this.renderedExtent_, currentExtent)) {
+        this.fixedCount_ = 0;
         return true;
       }
     }
+
+    if (this.fixedCount_++ < this.pendingFrame_) {
+      this.getLayer().changed();
+      return true;
+    }
+
+    this.fixedCount_ = 0;
 
     this.sourceRevision_ = vectorSource.getRevision();
     this.prepareFilteredFeatures_(vectorSource, "prepareFrameInternal");
@@ -554,15 +575,21 @@ class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer {
     const currentZoom = frameState.viewState.zoom;
 
     if (this.shouldUseFiltering_) {
+      // if (currentZoom < maxZoom / 4) {
+      //   featuresToRender = this.filteredFeatures30k_;
+      //   console.log(`🎯 Rendering 30k filtered features (zoom: ${currentZoom.toFixed(2)}/${maxZoom})`);
+      // } else if (currentZoom < maxZoom / 2) {
+      // if (currentZoom < maxZoom / 3) {
       if (currentZoom < maxZoom / 4) {
-        featuresToRender = this.filteredFeatures30k_;
-        console.log(`🎯 Rendering 30k filtered features (zoom: ${currentZoom.toFixed(2)}/${maxZoom})`);
-      } else if (currentZoom < maxZoom / 2) {
         featuresToRender = this.filteredFeatures50k_;
         console.log(`🎯 Rendering 50k filtered features (zoom: ${currentZoom.toFixed(2)}/${maxZoom})`);
-      } else if (currentZoom < (maxZoom * 3) / 4) {
+        this.pendingFrame_ = 10;
+        // } else if (currentZoom < (maxZoom * 2) / 3) {
+      } else if (currentZoom < maxZoom / 2) {
+        // if (currentZoom < maxZoom / 2) {
         featuresToRender = this.filteredFeatures100k_;
         console.log(`🎯 Rendering 100k filtered features (zoom: ${currentZoom.toFixed(2)}/${maxZoom})`);
+        this.pendingFrame_ = 10;
       } else {
         // Add 50% buffer to extent for pre-rendering
         const width = frameState.extent[2] - frameState.extent[0];
@@ -572,6 +599,7 @@ class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer {
         // Get features in viewport+buffer extent
         featuresToRender = vectorSource.getFeaturesInExtent(extent);
         console.log(`🎯 Rendering all ${featuresToRender.length} features (zoom: ${currentZoom.toFixed(2)}/${maxZoom})`);
+        this.pendingFrame_ = 2;
       }
 
       // Update batch with filtered features
