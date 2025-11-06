@@ -194,7 +194,7 @@ declare class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer<any> {
      * @private
      * @type {number}
      */
-    private previousZoom_;
+    private previousZoomTier_;
     /**
      * @private
      * @type {number}
@@ -206,11 +206,24 @@ declare class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer<any> {
      */
     private pendingFrame_;
     /**
+     * @private
+     * @type {import('../../structs/RBush.js').default}
+     */
+    private declutterTree_;
+    /**
      * Initialize and cache maxZoom from the map's view (called once)
      * Sets this.maxZoom_ property
      * @private
      */
     private getMaxZoom_;
+    /**
+     * Apply declutter logic to features
+     * @private
+     * @param {Array<import("../../Feature.js").FeatureLike>} features Features to declutter
+     * @param {number} resolution Current resolution
+     * @return {Array<import("../../Feature.js").FeatureLike>} Decluttered features
+     */
+    private applyDeclutter_;
     /**
      * @private
      * @param {import("../../source/Vector.js").default} source Source.
@@ -281,7 +294,6 @@ declare class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer<any> {
      * @param {import('../../render/webgl/VectorStyleRenderer.js').WebGLBuffers} buffers Buffers
      */
     disposeBuffers(buffers: import("../../render/webgl/VectorStyleRenderer.js").WebGLBuffers): void;
-    renderDeclutter(): void;
 }
 import WebGLLayerRenderer from "./Layer.js";
 import VectorStyleRenderer from "../../render/webgl/VectorStyleRenderer.js";

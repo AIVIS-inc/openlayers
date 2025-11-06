@@ -11,6 +11,7 @@ import { colorDecodeId } from "../../render/webgl/encodeUtil.js";
 import MixedGeometryBatch from "../../render/webgl/MixedGeometryBatch.js";
 import VectorStyleRenderer from "../../render/webgl/VectorStyleRenderer.js";
 import VectorEventType from "../../source/VectorEventType.js";
+import RBush from "../../structs/RBush.js";
 import {
   apply as applyTransform,
   create as createTransform,
@@ -223,7 +224,7 @@ class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer {
      * @private
      * @type {number}
      */
-    this.previousZoom_ = -1;
+    this.previousZoomTier_ = -1;
 
     /**
      * @private
@@ -236,6 +237,12 @@ class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer {
      * @type {number}
      */
     this.pendingFrame_ = 10;
+
+    /**
+     * @private
+     * @type {import('../../structs/RBush.js').default}
+     */
+    this.declutterTree_ = new RBush();
   }
 
   /**
@@ -273,6 +280,126 @@ class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer {
   }
 
   /**
+   * Apply declutter logic to features
+   * @private
+   * @param {Array<import("../../Feature.js").FeatureLike>} features Features to declutter
+   * @param {number} resolution Current resolution
+   * @return {Array<import("../../Feature.js").FeatureLike>} Decluttered features
+   */
+  applyDeclutter_(features, resolution) {
+    this.declutterTree_.clear();
+
+    const featuresLength = features.length;
+
+    // Calculate circle radius dynamically from layer style
+    let circleRadius = 8; // default fallback
+    const zoom = Math.log2(156543.03392804097 / resolution);
+    const layer = this.getLayer();
+
+    if (layer && layer.webglStyle_) {
+      const flatStyle = layer.webglStyle_;
+
+      // Check if it's a flat style object with circle-radius
+      if (typeof flatStyle === "object" && flatStyle["circle-radius"] !== undefined) {
+        const radiusValue = flatStyle["circle-radius"];
+
+        // Handle different types of radius values
+        if (typeof radiusValue === "number") {
+          circleRadius = radiusValue;
+        } else if (Array.isArray(radiusValue)) {
+          try {
+            // Handle interpolate expressions manually
+            if (radiusValue[0] === "interpolate" && radiusValue.length >= 6) {
+              // ['interpolate', ['linear'], ['zoom'], 0, 0.1, 22, 7]
+              const stops = [];
+              for (let i = 3; i < radiusValue.length; i += 2) {
+                if (i + 1 < radiusValue.length) {
+                  stops.push([radiusValue[i], radiusValue[i + 1]]);
+                }
+              }
+              // Simple linear interpolation
+              if (stops.length >= 2) {
+                if (zoom <= stops[0][0]) {
+                  circleRadius = stops[0][1];
+                } else if (zoom >= stops[stops.length - 1][0]) {
+                  circleRadius = stops[stops.length - 1][1];
+                } else {
+                  // Find the right interval and interpolate
+                  for (let i = 0; i < stops.length - 1; i++) {
+                    if (zoom >= stops[i][0] && zoom <= stops[i + 1][0]) {
+                      const t = (zoom - stops[i][0]) / (stops[i + 1][0] - stops[i][0]);
+                      circleRadius = stops[i][1] + t * (stops[i + 1][1] - stops[i][1]);
+                      break;
+                    }
+                  }
+                }
+              }
+            } else if (radiusValue[0] === "literal" && typeof radiusValue[1] === "number") {
+              circleRadius = radiusValue[1];
+            } else if (typeof radiusValue[0] === "number") {
+              // Simple array with first element as number
+              circleRadius = radiusValue[0];
+            }
+          } catch (_e) {
+            // Keep default radius if parsing fails
+          }
+        }
+      }
+
+      // Add stroke width if present
+      if (flatStyle["circle-stroke-width"]) {
+        const strokeWidth = flatStyle["circle-stroke-width"];
+        if (typeof strokeWidth === "number") {
+          circleRadius += strokeWidth / 2; // Add half stroke width to radius
+        }
+      }
+    }
+
+    const declutterBuffer = (circleRadius * resolution) / 8;
+
+    // Pre-allocate declutteredFeatures array
+    const declutteredFeatures = new Array(featuresLength);
+    let declutteredCount = 0;
+
+    // Reuse arrays to avoid allocations
+    const declutterExtent = new Array(4);
+    const insertExtent = new Array(4);
+
+    for (let i = 0; i < featuresLength; i++) {
+      const feature = features[i];
+      const geometry = feature.getGeometry();
+
+      if (!geometry) continue;
+
+      const featureExtent = geometry.getExtent();
+
+      // Calculate declutter extent with buffer
+      declutterExtent[0] = featureExtent[0] - declutterBuffer; // minX
+      declutterExtent[1] = featureExtent[1] - declutterBuffer; // minY
+      declutterExtent[2] = featureExtent[2] + declutterBuffer; // maxX
+      declutterExtent[3] = featureExtent[3] + declutterBuffer; // maxY
+
+      const collisions = this.declutterTree_.getInExtent(declutterExtent);
+
+      if (collisions.length === 0) {
+        // Copy to insertExtent
+        insertExtent[0] = declutterExtent[0];
+        insertExtent[1] = declutterExtent[1];
+        insertExtent[2] = declutterExtent[2];
+        insertExtent[3] = declutterExtent[3];
+
+        this.declutterTree_.insert(insertExtent, feature);
+        declutteredFeatures[declutteredCount++] = feature;
+      }
+    }
+
+    // Trim array to actual size
+    declutteredFeatures.length = declutteredCount;
+
+    return declutteredFeatures;
+  }
+
+  /**
    * @private
    * @param {import("../../source/Vector.js").default} source Source.
    */
@@ -291,11 +418,11 @@ class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer {
     // 1. If less than 30,000 features, render all without filtering
     if (this.totalFeaturesCount_ < 30000) {
       this.shouldUseFiltering_ = false;
-      console.log(`✅ Rendering all ${this.totalFeaturesCount_} features (< 30,000, no filtering)`);
+      // console.log(`✅ Rendering all ${this.totalFeaturesCount_} features (< 30,000, no filtering)`);
     } else {
       // 2. Create 3-tier filtered feature lists (30k, 50k, 100k)
       this.shouldUseFiltering_ = true;
-      console.log(`🎯 Creating 3-tier filtered lists for ${this.totalFeaturesCount_} features`);
+      // console.log(`🎯 Creating 3-tier filtered lists for ${this.totalFeaturesCount_} features`);
 
       // Helper function to add features not in previous set
       const addAdditionalFeatures = (targetCount, previousIndices, allFeatures, previousFeatures) => {
@@ -572,34 +699,28 @@ class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer {
     // Select features based on zoom level
     let featuresToRender;
     const maxZoom = this.getMaxZoom_();
-    const currentZoom = frameState.viewState.zoom;
+    const currentZoomTier = frameState.viewState.zoom >= (maxZoom * 7) / 10 ? 0 : 1;
 
     if (this.shouldUseFiltering_) {
-      // if (currentZoom < maxZoom / 4) {
-      //   featuresToRender = this.filteredFeatures30k_;
-      //   console.log(`🎯 Rendering 30k filtered features (zoom: ${currentZoom.toFixed(2)}/${maxZoom})`);
-      // } else if (currentZoom < maxZoom / 2) {
-      // if (currentZoom < maxZoom / 3) {
-      if (currentZoom < maxZoom / 4) {
-        featuresToRender = this.filteredFeatures50k_;
-        console.log(`🎯 Rendering 50k filtered features (zoom: ${currentZoom.toFixed(2)}/${maxZoom})`);
-        this.pendingFrame_ = 10;
-        // } else if (currentZoom < (maxZoom * 2) / 3) {
-      } else if (currentZoom < maxZoom / 2) {
-        // if (currentZoom < maxZoom / 2) {
-        featuresToRender = this.filteredFeatures100k_;
-        console.log(`🎯 Rendering 100k filtered features (zoom: ${currentZoom.toFixed(2)}/${maxZoom})`);
-        this.pendingFrame_ = 10;
-      } else {
-        // Add 50% buffer to extent for pre-rendering
-        const width = frameState.extent[2] - frameState.extent[0];
-        const height = frameState.extent[3] - frameState.extent[1];
-        const extent = [frameState.extent[0] - width * 0.5, frameState.extent[1] - height * 0.5, frameState.extent[2] + width * 0.5, frameState.extent[3] + height * 0.5];
+      if (currentZoomTier === 1 && currentZoomTier !== this.previousZoomTier_) {
+        featuresToRender = this.applyDeclutter_(this.filteredFeatures100k_, resolution);
 
-        // Get features in viewport+buffer extent
+        this.pendingFrame_ = 10;
+        // console.log(
+        //   `🎯 Rendering 100k filtered features (zoom: ${currentZoom.toFixed(2)}/${maxZoom}, filtered length: ${this.filteredFeatures100k_.length}, decluttered length: ${featuresToRender.length})`
+        // );
+      } else if (currentZoomTier === 0) {
+        // Add 30% buffer to extent for pre-rendering
+        const bufferRatio = 0.3;
+        const widthBuffer = (frameState.extent[2] - frameState.extent[0]) * bufferRatio;
+        const heightBuffer = (frameState.extent[3] - frameState.extent[1]) * bufferRatio;
+        const extent = [frameState.extent[0] - widthBuffer, frameState.extent[1] - heightBuffer, frameState.extent[2] + widthBuffer, frameState.extent[3] + heightBuffer];
         featuresToRender = vectorSource.getFeaturesInExtent(extent);
-        console.log(`🎯 Rendering all ${featuresToRender.length} features (zoom: ${currentZoom.toFixed(2)}/${maxZoom})`);
+
         this.pendingFrame_ = 2;
+        // console.log(`🎯 Rendering all ${featuresToRender.length} features (zoom: ${currentZoom.toFixed(2)}/${maxZoom}, filtered length: ${featuresToRender.length})`);
+      } else {
+        return true;
       }
 
       // Update batch with filtered features
@@ -625,6 +746,7 @@ class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer {
 
     this.renderedExtent_ = currentExtent;
     this.previousExtent_ = currentExtent;
+    this.previousZoomTier_ = currentZoomTier;
     return true;
   }
 
@@ -727,8 +849,6 @@ class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer {
     }
     super.disposeInternal();
   }
-
-  renderDeclutter() {}
 }
 
 export default AivisWebGLVectorLayerRenderer;
