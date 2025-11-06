@@ -108,6 +108,11 @@ class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer {
     this.previousExtent_ = createEmpty();
 
     /**
+     * @private
+     */
+    this.renderedExtent_ = createEmpty();
+
+    /**
      * This transform is updated on every frame and is the composition of:
      * - invert of the world->screen transform that was used when rebuilding buffers (see `this.renderTransform_`)
      * - current world->screen transform
@@ -177,6 +182,169 @@ class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer {
      * @type {Array<import("../../events.js").EventsKey|null>}
      */
     this.sourceListenKeys_ = null;
+
+    /**
+     * @private
+     * @type {number}
+     */
+    this.totalFeaturesCount_ = 0;
+
+    /**
+     * @private
+     * @type {Array<import("../../Feature.js").FeatureLike>}
+     */
+    this.filteredFeatures30k_ = null;
+
+    /**
+     * @private
+     * @type {Array<import("../../Feature.js").FeatureLike>}
+     */
+    this.filteredFeatures50k_ = null;
+
+    /**
+     * @private
+     * @type {Array<import("../../Feature.js").FeatureLike>}
+     */
+    this.filteredFeatures100k_ = null;
+
+    /**
+     * @private
+     * @type {boolean}
+     */
+    this.shouldUseFiltering_ = false;
+
+    /**
+     * @private
+     * @type {number}
+     */
+    this.maxZoom_ = -1;
+
+    /**
+     * @private
+     * @type {number}
+     */
+    this.previousZoom_ = -1;
+  }
+
+  /**
+   * Initialize and cache maxZoom from the map's view (called once)
+   * Sets this.maxZoom_ property
+   * @private
+   */
+  getMaxZoom_() {
+    // Already initialized
+    if (this.maxZoom_ > 0) {
+      return this.maxZoom_;
+    }
+
+    // Try to get maxZoom from the map's view
+    let maxZoom = 5; // Default fallback for WSI
+    try {
+      const layer = this.getLayer();
+      const mapFromLayer = layer.getMapInternal();
+      if (mapFromLayer) {
+        const view = mapFromLayer.getView();
+        if (view) {
+          const viewMaxZoom = view.getMaxZoom();
+          if (viewMaxZoom && viewMaxZoom > 0) {
+            maxZoom = viewMaxZoom;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("Unable to get maxZoom from map, using default:", e);
+    }
+
+    // Cache the value
+    this.maxZoom_ = maxZoom;
+    return maxZoom;
+  }
+
+  /**
+   * @private
+   * @param {import("../../source/Vector.js").default} source Source.
+   */
+  prepareFilteredFeatures_(source, from) {
+    const allFeatures = source.getFeatures();
+
+    if (allFeatures.length === this.totalFeaturesCount_) {
+      return;
+    }
+
+    console.log("prepareFilteredFeatures_", from);
+
+    // Store total feature count on first load and create 3-tier filtered feature lists
+    this.totalFeaturesCount_ = allFeatures.length;
+
+    // 1. If less than 30,000 features, render all without filtering
+    if (this.totalFeaturesCount_ < 30000) {
+      this.shouldUseFiltering_ = false;
+      console.log(`✅ Rendering all ${this.totalFeaturesCount_} features (< 30,000, no filtering)`);
+    } else {
+      // 2. Create 3-tier filtered feature lists (30k, 50k, 100k)
+      this.shouldUseFiltering_ = true;
+      console.log(`🎯 Creating 3-tier filtered lists for ${this.totalFeaturesCount_} features`);
+
+      // Helper function to add features not in previous set
+      const addAdditionalFeatures = (targetCount, previousIndices, allFeatures, previousFeatures) => {
+        const maxCount = Math.min(targetCount, this.totalFeaturesCount_);
+        const additionalNeeded = maxCount - previousFeatures.length;
+        const resultArray = new Array(maxCount);
+
+        // First, copy all previous features
+        let j = 0;
+        for (let i = 0; i < previousFeatures.length; i++) {
+          resultArray[j++] = previousFeatures[i];
+        }
+
+        // Then, add additional features not in previous set
+        if (additionalNeeded > 0) {
+          const availableIndices = this.totalFeaturesCount_ - previousIndices.size;
+          const indexInterval = Math.max(1, Math.floor(availableIndices / additionalNeeded));
+
+          let added = 0;
+          for (let i = 0; i < this.totalFeaturesCount_ && added < additionalNeeded; i++) {
+            if (!previousIndices.has(i) && i % indexInterval === 0) {
+              resultArray[j++] = allFeatures[i];
+              previousIndices.add(i);
+              added++;
+            }
+          }
+
+          // If still need more, add remaining features
+          if (added < additionalNeeded) {
+            for (let i = 0; i < this.totalFeaturesCount_ && j < maxCount; i++) {
+              if (!previousIndices.has(i)) {
+                resultArray[j++] = allFeatures[i];
+                previousIndices.add(i);
+              }
+            }
+          }
+        }
+
+        resultArray.length = j;
+        return resultArray;
+      };
+
+      // 2-1. Create 30,000 feature list
+      const indexInterval30k = Math.ceil(this.totalFeaturesCount_ / 30000);
+      const filteredLength30k = Math.ceil(this.totalFeaturesCount_ / indexInterval30k);
+      this.filteredFeatures30k_ = new Array(filteredLength30k);
+      const indices30k = new Set();
+
+      for (let i = 0, j = 0; i < this.totalFeaturesCount_; i += indexInterval30k) {
+        this.filteredFeatures30k_[j++] = allFeatures[i];
+        indices30k.add(i);
+      }
+
+      // 2-2. Create 50,000 feature list (includes all 30k features)
+      this.filteredFeatures50k_ = addAdditionalFeatures(50000, indices30k, allFeatures, this.filteredFeatures30k_);
+
+      // 2-3. Create 100,000 feature list (includes all 50k features)
+      this.filteredFeatures100k_ = addAdditionalFeatures(100000, indices30k, allFeatures, this.filteredFeatures50k_);
+
+      console.log(`✅ Filtered lists: 30k=${this.filteredFeatures30k_.length}, 50k=${this.filteredFeatures50k_.length}, 100k=${this.filteredFeatures100k_.length}`);
+    }
   }
 
   /**
@@ -185,6 +353,9 @@ class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer {
    */
   addInitialFeatures_(frameState) {
     const source = this.getLayer().getSource();
+
+    this.prepareFilteredFeatures_(source, "addInitialFeatures_");
+
     const userProjection = getUserProjection();
     let projectionTransform;
     if (userProjection) {
@@ -345,44 +516,81 @@ class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer {
     const layer = this.getLayer();
     const vectorSource = layer.getSource();
     const viewState = frameState.viewState;
-    const viewNotMoving = !frameState.viewHints[ViewHint.ANIMATING] && !frameState.viewHints[ViewHint.INTERACTING];
-    const extentChanged = !equals(this.previousExtent_, frameState.extent);
+    const currentExtent = frameState.extent.slice();
+    const isViewPortMoving = frameState.viewHints[ViewHint.ANIMATING] || frameState.viewHints[ViewHint.INTERACTING] || !equals(this.previousExtent_, currentExtent);
     const sourceChanged = this.sourceRevision_ < vectorSource.getRevision();
 
-    if (sourceChanged) {
-      this.sourceRevision_ = vectorSource.getRevision();
+    if (!sourceChanged) {
+      if (isViewPortMoving) {
+        this.previousExtent_ = currentExtent;
+        this.getLayer().changed();
+        return true;
+      } else if (equals(this.renderedExtent_, currentExtent)) {
+        return true;
+      }
     }
 
-    if (viewNotMoving && (extentChanged || sourceChanged)) {
-      const projection = viewState.projection;
-      const resolution = viewState.resolution;
+    this.sourceRevision_ = vectorSource.getRevision();
+    this.prepareFilteredFeatures_(vectorSource, "prepareFrameInternal");
 
-      const renderBuffer = layer instanceof BaseVector ? layer.getRenderBuffer() : 0;
-      const extent = buffer(frameState.extent, renderBuffer * resolution);
+    const projection = viewState.projection;
+    const resolution = viewState.resolution;
 
-      const userProjection = getUserProjection();
-      if (userProjection) {
-        vectorSource.loadFeatures(toUserExtent(extent, userProjection), toUserResolution(resolution, projection), userProjection);
+    const renderBuffer = layer instanceof BaseVector ? layer.getRenderBuffer() : 0;
+    const extent = buffer(frameState.extent, renderBuffer * resolution);
+
+    const userProjection = getUserProjection();
+    if (userProjection) {
+      vectorSource.loadFeatures(toUserExtent(extent, userProjection), toUserResolution(resolution, projection), userProjection);
+    } else {
+      vectorSource.loadFeatures(extent, resolution, projection);
+    }
+
+    this.ready = false;
+
+    // Select features based on zoom level
+    let featuresToRender;
+    const maxZoom = this.getMaxZoom_();
+    const currentZoom = frameState.viewState.zoom;
+
+    if (this.shouldUseFiltering_) {
+      if (currentZoom < maxZoom / 4) {
+        featuresToRender = this.filteredFeatures30k_;
+        console.log(`🎯 Rendering 30k filtered features (zoom: ${currentZoom.toFixed(2)}/${maxZoom})`);
+      } else if (currentZoom < maxZoom / 2) {
+        featuresToRender = this.filteredFeatures50k_;
+        console.log(`🎯 Rendering 50k filtered features (zoom: ${currentZoom.toFixed(2)}/${maxZoom})`);
+      } else if (currentZoom < (maxZoom * 3) / 4) {
+        featuresToRender = this.filteredFeatures100k_;
+        console.log(`🎯 Rendering 100k filtered features (zoom: ${currentZoom.toFixed(2)}/${maxZoom})`);
       } else {
-        vectorSource.loadFeatures(extent, resolution, projection);
+        featuresToRender = vectorSource.getFeatures();
+        console.log(`🎯 Rendering all ${featuresToRender.length} features (zoom: ${currentZoom.toFixed(2)}/${maxZoom})`);
       }
 
-      this.ready = false;
-
-      const transform = this.helper.makeProjectionTransform(frameState, createTransform());
-
-      this.styleRenderer_.generateBuffers(this.batch_, transform).then(buffers => {
-        if (this.buffers_) {
-          this.disposeBuffers(this.buffers_);
-        }
-        this.buffers_ = buffers;
-        this.ready = true;
-        this.getLayer().changed();
-      });
-
-      this.previousExtent_ = frameState.extent.slice();
+      // Update batch with filtered features
+      this.batch_.clear();
+      const userProjection = getUserProjection();
+      let projectionTransform;
+      if (userProjection) {
+        projectionTransform = getTransformFromProjections(userProjection, frameState.viewState.projection);
+      }
+      this.batch_.addFeatures(featuresToRender, projectionTransform);
     }
 
+    const transform = this.helper.makeProjectionTransform(frameState, createTransform());
+
+    this.styleRenderer_.generateBuffers(this.batch_, transform).then(buffers => {
+      if (this.buffers_) {
+        this.disposeBuffers(this.buffers_);
+      }
+      this.buffers_ = buffers;
+      this.ready = true;
+      this.getLayer().changed();
+    });
+
+    this.renderedExtent_ = currentExtent;
+    this.previousExtent_ = currentExtent;
     return true;
   }
 

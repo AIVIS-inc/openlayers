@@ -98,6 +98,10 @@ declare class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer<any> {
      */
     private previousExtent_;
     /**
+     * @private
+     */
+    private renderedExtent_;
+    /**
      * This transform is updated on every frame and is the composition of:
      * - invert of the world->screen transform that was used when rebuilding buffers (see `this.renderTransform_`)
      * - current world->screen transform
@@ -156,6 +160,52 @@ declare class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer<any> {
      * @type {Array<import("../../events.js").EventsKey|null>}
      */
     private sourceListenKeys_;
+    /**
+     * @private
+     * @type {number}
+     */
+    private totalFeaturesCount_;
+    /**
+     * @private
+     * @type {Array<import("../../Feature.js").FeatureLike>}
+     */
+    private filteredFeatures30k_;
+    /**
+     * @private
+     * @type {Array<import("../../Feature.js").FeatureLike>}
+     */
+    private filteredFeatures50k_;
+    /**
+     * @private
+     * @type {Array<import("../../Feature.js").FeatureLike>}
+     */
+    private filteredFeatures100k_;
+    /**
+     * @private
+     * @type {boolean}
+     */
+    private shouldUseFiltering_;
+    /**
+     * @private
+     * @type {number}
+     */
+    private maxZoom_;
+    /**
+     * @private
+     * @type {number}
+     */
+    private previousZoom_;
+    /**
+     * Initialize and cache maxZoom from the map's view (called once)
+     * Sets this.maxZoom_ property
+     * @private
+     */
+    private getMaxZoom_;
+    /**
+     * @private
+     * @param {import("../../source/Vector.js").default} source Source.
+     */
+    private prepareFilteredFeatures_;
     /**
      * @private
      * @param {import("../../Map.js").FrameState} frameState Frame state.
