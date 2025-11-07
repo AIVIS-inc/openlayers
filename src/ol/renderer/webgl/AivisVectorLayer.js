@@ -194,19 +194,19 @@ class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer {
      * @private
      * @type {Array<import("../../Feature.js").FeatureLike>}
      */
-    this.filteredFeatures30k_ = null;
+    this.features4Tier1_ = null;
 
     /**
      * @private
      * @type {Array<import("../../Feature.js").FeatureLike>}
      */
-    this.filteredFeatures50k_ = null;
+    this.features4Tier2_ = null;
 
     /**
      * @private
      * @type {Array<import("../../Feature.js").FeatureLike>}
      */
-    this.filteredFeatures100k_ = null;
+    this.feature4Tier3_ = null;
 
     /**
      * @private
@@ -224,7 +224,25 @@ class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer {
      * @private
      * @type {number}
      */
-    this.previousZoomTier_ = -1;
+    this.previousZoom_ = -1;
+
+    /**
+     * @private
+     * @type {boolean}
+     */
+    this.needsBatchUpdate_ = false;
+
+    /**
+     * @private
+     * @type {boolean}
+     */
+    this.isBatchUpdatePending_ = false;
+
+    /**
+     * @private
+     * @type {Array<import("../../Feature.js").FeatureLike>}
+     */
+    this.currentFeaturesToRender_ = null;
 
     /**
      * @private
@@ -367,29 +385,33 @@ class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer {
 
     for (let i = 0; i < featuresLength; i++) {
       const feature = features[i];
-      const geometry = feature.getGeometry();
+      try {
+        const geometry = feature.getGeometry();
 
-      if (!geometry) continue;
+        if (!geometry) continue;
 
-      const featureExtent = geometry.getExtent();
+        const featureExtent = geometry.getExtent();
 
-      // Calculate declutter extent with buffer
-      declutterExtent[0] = featureExtent[0] - declutterBuffer; // minX
-      declutterExtent[1] = featureExtent[1] - declutterBuffer; // minY
-      declutterExtent[2] = featureExtent[2] + declutterBuffer; // maxX
-      declutterExtent[3] = featureExtent[3] + declutterBuffer; // maxY
+        // Calculate declutter extent with buffer
+        declutterExtent[0] = featureExtent[0] - declutterBuffer; // minX
+        declutterExtent[1] = featureExtent[1] - declutterBuffer; // minY
+        declutterExtent[2] = featureExtent[2] + declutterBuffer; // maxX
+        declutterExtent[3] = featureExtent[3] + declutterBuffer; // maxY
 
-      const collisions = this.declutterTree_.getInExtent(declutterExtent);
+        const collisions = this.declutterTree_.getInExtent(declutterExtent);
 
-      if (collisions.length === 0) {
-        // Copy to insertExtent
-        insertExtent[0] = declutterExtent[0];
-        insertExtent[1] = declutterExtent[1];
-        insertExtent[2] = declutterExtent[2];
-        insertExtent[3] = declutterExtent[3];
+        if (collisions.length === 0) {
+          // Copy to insertExtent
+          insertExtent[0] = declutterExtent[0];
+          insertExtent[1] = declutterExtent[1];
+          insertExtent[2] = declutterExtent[2];
+          insertExtent[3] = declutterExtent[3];
 
-        this.declutterTree_.insert(insertExtent, feature);
-        declutteredFeatures[declutteredCount++] = feature;
+          this.declutterTree_.insert(insertExtent, feature);
+          declutteredFeatures[declutteredCount++] = feature;
+        }
+      } catch (e) {
+        console.error("Error getting geometry for feature", feature, e);
       }
     }
 
@@ -400,23 +422,114 @@ class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer {
   }
 
   /**
+   * Update batch with features in worker-style async manner
+   * @private
+   * @param {Array<import("../../Feature.js").FeatureLike>} features Features to add to batch
+   * @param {import("../../proj.js").TransformFunction} projectionTransform Transform function
+   * @return {Promise<void>}
+   */
+  updateBatchAsync_(features, projectionTransform) {
+    return new Promise(resolve => {
+      // Use setTimeout to defer work to next tick (worker-style async)
+      setTimeout(() => {
+        console.log("rendered features length", features.length);
+        this.batch_.clear();
+        this.batch_.addFeatures(features, projectionTransform);
+        resolve();
+      }, 0);
+    });
+  }
+
+  /**
+   * Process features for current zoom tier in worker-style async manner
+   * Does NOT block prepareFrameInternal - runs completely async
+   * Handles: feature filtering + declutter + batch update + buffer generation
+   * @private
+   * @param {number} currentZoomTier Current zoom tier
+   * @param {import("../../Map.js").FrameState} frameState Frame state
+   * @param {import("../../source/Vector.js").default} vectorSource Vector source
+   */
+  processFeaturesForZoomTier_(currentZoomTier, frameState, vectorSource) {
+    if (this.isBatchUpdatePending_) {
+      return;
+    }
+
+    this.isBatchUpdatePending_ = true;
+    this.ready = false;
+
+    // Use setTimeout to defer heavy computation (worker-style async)
+    setTimeout(() => {
+      const resolution = frameState.viewState.resolution;
+      let featuresToRender;
+
+      if (currentZoomTier === 0) {
+        // High zoom: use viewport extent with buffer
+        const bufferRatio = 0.3;
+        const widthBuffer = (frameState.extent[2] - frameState.extent[0]) * bufferRatio;
+        const heightBuffer = (frameState.extent[3] - frameState.extent[1]) * bufferRatio;
+        const extent = [frameState.extent[0] - widthBuffer, frameState.extent[1] - heightBuffer, frameState.extent[2] + widthBuffer, frameState.extent[3] + heightBuffer];
+        featuresToRender = vectorSource.getFeaturesInExtent(extent);
+        this.pendingFrame_ = 2;
+      } else {
+        featuresToRender = this.features4Tier3_;
+        switch (currentZoomTier) {
+          case 1:
+            featuresToRender = this.features4Tier1_;
+            break;
+          case 2:
+            featuresToRender = this.features4Tier2_;
+            break;
+          default:
+            featuresToRender = this.features4Tier3_;
+            break;
+        }
+        featuresToRender = this.applyDeclutter_(featuresToRender, resolution);
+        this.pendingFrame_ = 10;
+      }
+
+      this.currentFeaturesToRender_ = featuresToRender;
+
+      // Update batch (also async)
+      const userProjection = getUserProjection();
+      let projectionTransform;
+      if (userProjection) {
+        projectionTransform = getTransformFromProjections(userProjection, frameState.viewState.projection);
+      }
+
+      this.updateBatchAsync_(featuresToRender, projectionTransform).then(() => {
+        // Generate buffers after batch is ready - all in worker
+        const transform = this.helper.makeProjectionTransform(frameState, createTransform());
+
+        this.styleRenderer_.generateBuffers(this.batch_, transform).then(buffers => {
+          if (this.buffers_) {
+            this.disposeBuffers(this.buffers_);
+          }
+          this.buffers_ = buffers;
+          this.ready = true;
+          this.isBatchUpdatePending_ = false;
+          this.needsBatchUpdate_ = false;
+          this.getLayer().changed();
+        });
+      });
+    }, 0);
+  }
+
+  /**
    * @private
    * @param {import("../../source/Vector.js").default} source Source.
    */
-  prepareFilteredFeatures_(source, from) {
+  prepareFilteredFeatures_(source) {
     const allFeatures = source.getFeatures();
 
     if (allFeatures.length === this.totalFeaturesCount_) {
       return;
     }
 
-    console.log("prepareFilteredFeatures_", from);
-
     // Store total feature count on first load and create 3-tier filtered feature lists
     this.totalFeaturesCount_ = allFeatures.length;
 
     // 1. If less than 30,000 features, render all without filtering
-    if (this.totalFeaturesCount_ < 30000) {
+    if (this.totalFeaturesCount_ < 50_000) {
       this.shouldUseFiltering_ = false;
       // console.log(`✅ Rendering all ${this.totalFeaturesCount_} features (< 30,000, no filtering)`);
     } else {
@@ -465,42 +578,38 @@ class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer {
         return resultArray;
       };
 
-      // 2-1. Create 30,000 feature list
-      const indexInterval30k = Math.ceil(this.totalFeaturesCount_ / 30000);
-      const filteredLength30k = Math.ceil(this.totalFeaturesCount_ / indexInterval30k);
-      this.filteredFeatures30k_ = new Array(filteredLength30k);
-      const indices30k = new Set();
+      // 2-1. Create 1/3 of total features feature list
+      const featuresLengthTier3 = Math.min(50_000, Math.ceil((1 / 5) * this.totalFeaturesCount_));
+      const intervalTier3 = Math.ceil(this.totalFeaturesCount_ / featuresLengthTier3);
+      this.features4Tier3_ = new Array(featuresLengthTier3);
+      const features4Tier3_ = new Set();
 
-      for (let i = 0, j = 0; i < this.totalFeaturesCount_; i += indexInterval30k) {
-        this.filteredFeatures30k_[j++] = allFeatures[i];
-        indices30k.add(i);
+      for (let i = 0, j = 0; i < this.totalFeaturesCount_; i += intervalTier3) {
+        this.features4Tier3_[j++] = allFeatures[i];
+        features4Tier3_.add(i);
       }
 
-      // 2-2. Create 50,000 feature list (includes all 30k features)
-      this.filteredFeatures50k_ = addAdditionalFeatures(50000, indices30k, allFeatures, this.filteredFeatures30k_);
+      // 2-2. Create 1/2 feature list (includes all 30k features)
+      const featuresLengthTier2 = Math.min(100_000, Math.ceil((2 / 5) * this.totalFeaturesCount_));
+      this.features4Tier2_ = addAdditionalFeatures(featuresLengthTier2, features4Tier3_, allFeatures, this.features4Tier3_);
 
       // 2-3. Create 100,000 feature list (includes all 50k features)
-      this.filteredFeatures100k_ = addAdditionalFeatures(100000, indices30k, allFeatures, this.filteredFeatures50k_);
+      const featuresLengthTier1 = Math.min(200_000, Math.ceil((1 / 2) * this.totalFeaturesCount_));
+      this.features4Tier1_ = addAdditionalFeatures(featuresLengthTier1, features4Tier3_, allFeatures, this.features4Tier2_);
 
-      console.log(`✅ Filtered lists: 30k=${this.filteredFeatures30k_.length}, 50k=${this.filteredFeatures50k_.length}, 100k=${this.filteredFeatures100k_.length}`);
+      console.log(`✅ Filtered lists: Tier 3=${this.features4Tier3_.length}, Tier 2=${this.features4Tier2_.length}, Tier 1=${this.features4Tier1_.length}`);
     }
   }
 
   /**
    * @private
-   * @param {import("../../Map.js").FrameState} frameState Frame state.
+   * @param {import("../../proj.js").TransformFunction} projectionTransform Transform function.
    */
-  addInitialFeatures_(frameState) {
+  addInitialFeatures_(projectionTransform) {
     const source = this.getLayer().getSource();
 
-    this.prepareFilteredFeatures_(source, "addInitialFeatures_");
+    this.prepareFilteredFeatures_(source);
 
-    const userProjection = getUserProjection();
-    let projectionTransform;
-    if (userProjection) {
-      projectionTransform = getTransformFromProjections(userProjection, frameState.viewState.projection);
-    }
-    this.batch_.addFeatures(source.getFeatures(), projectionTransform);
     this.sourceListenKeys_ = [
       listen(source, VectorEventType.ADDFEATURE, this.handleSourceFeatureAdded_.bind(this, projectionTransform)),
       listen(source, VectorEventType.CHANGEFEATURE, this.handleSourceFeatureChanged_.bind(this, projectionTransform), this),
@@ -559,8 +668,8 @@ class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer {
    * @private
    */
   handleSourceFeatureAdded_(projectionTransform, event) {
-    const feature = event.feature;
-    this.batch_.addFeature(feature, projectionTransform);
+    this.addInitialFeatures_(projectionTransform);
+    this.initialFeaturesAdded_ = true;
   }
 
   /**
@@ -647,11 +756,6 @@ class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer {
    * @override
    */
   prepareFrameInternal(frameState) {
-    if (!this.initialFeaturesAdded_) {
-      this.addInitialFeatures_(frameState);
-      this.initialFeaturesAdded_ = true;
-    }
-
     const layer = this.getLayer();
     const vectorSource = layer.getSource();
     const viewState = frameState.viewState;
@@ -679,7 +783,9 @@ class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer {
     this.fixedCount_ = 0;
 
     this.sourceRevision_ = vectorSource.getRevision();
-    this.prepareFilteredFeatures_(vectorSource, "prepareFrameInternal");
+    if (this.totalFeaturesCount_ !== vectorSource.getFeatures().length) {
+      this.prepareFilteredFeatures_(vectorSource);
+    }
 
     const projection = viewState.projection;
     const resolution = viewState.resolution;
@@ -696,57 +802,35 @@ class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer {
 
     this.ready = false;
 
-    // Select features based on zoom level
-    let featuresToRender;
     const maxZoom = this.getMaxZoom_();
-    const currentZoomTier = frameState.viewState.zoom >= (maxZoom * 7) / 10 ? 0 : 1;
+    const currentZoom = frameState.viewState.zoom;
+    // tier 3: 0-70%
+    // tier 2: 70-90%
+    // tier 1: 90-100%
+    // tier 0: 100%
+    const currentZoomTier = currentZoom >= (maxZoom * 7) / 10 ? 0 : currentZoom >= (maxZoom * 5) / 10 ? 1 : currentZoom >= (maxZoom * 3) / 10 ? 2 : 3;
 
-    if (this.shouldUseFiltering_) {
-      if (currentZoomTier === 1 && currentZoomTier !== this.previousZoomTier_) {
-        featuresToRender = this.applyDeclutter_(this.filteredFeatures100k_, resolution);
+    if (
+      (this.shouldUseFiltering_ && !this.isBatchUpdatePending_ && currentZoomTier !== 0 && currentZoom !== this.previousZoom_) ||
+      (currentZoomTier === 0 && !equals(this.renderedExtent_, frameState.extent))
+    ) {
+      this.processFeaturesForZoomTier_(currentZoomTier, frameState, vectorSource);
+      this.previousZoom_ = currentZoom;
+      this.renderedExtent_ = frameState.extent.slice();
 
-        this.pendingFrame_ = 10;
-        // console.log(
-        //   `🎯 Rendering 100k filtered features (zoom: ${currentZoom.toFixed(2)}/${maxZoom}, filtered length: ${this.filteredFeatures100k_.length}, decluttered length: ${featuresToRender.length})`
-        // );
-      } else if (currentZoomTier === 0) {
-        // Add 30% buffer to extent for pre-rendering
-        const bufferRatio = 0.3;
-        const widthBuffer = (frameState.extent[2] - frameState.extent[0]) * bufferRatio;
-        const heightBuffer = (frameState.extent[3] - frameState.extent[1]) * bufferRatio;
-        const extent = [frameState.extent[0] - widthBuffer, frameState.extent[1] - heightBuffer, frameState.extent[2] + widthBuffer, frameState.extent[3] + heightBuffer];
-        featuresToRender = vectorSource.getFeaturesInExtent(extent);
+      const transform = this.helper.makeProjectionTransform(frameState, createTransform());
 
-        this.pendingFrame_ = 2;
-        // console.log(`🎯 Rendering all ${featuresToRender.length} features (zoom: ${currentZoom.toFixed(2)}/${maxZoom}, filtered length: ${featuresToRender.length})`);
-      } else {
-        return true;
-      }
-
-      // Update batch with filtered features
-      this.batch_.clear();
-      const userProjection = getUserProjection();
-      let projectionTransform;
-      if (userProjection) {
-        projectionTransform = getTransformFromProjections(userProjection, frameState.viewState.projection);
-      }
-      this.batch_.addFeatures(featuresToRender, projectionTransform);
+      this.styleRenderer_.generateBuffers(this.batch_, transform).then(buffers => {
+        if (this.buffers_) {
+          this.disposeBuffers(this.buffers_);
+        }
+        this.buffers_ = buffers;
+        this.ready = true;
+        this.getLayer().changed();
+      });
     }
 
-    const transform = this.helper.makeProjectionTransform(frameState, createTransform());
-
-    this.styleRenderer_.generateBuffers(this.batch_, transform).then(buffers => {
-      if (this.buffers_) {
-        this.disposeBuffers(this.buffers_);
-      }
-      this.buffers_ = buffers;
-      this.ready = true;
-      this.getLayer().changed();
-    });
-
-    this.renderedExtent_ = currentExtent;
     this.previousExtent_ = currentExtent;
-    this.previousZoomTier_ = currentZoomTier;
     return true;
   }
 

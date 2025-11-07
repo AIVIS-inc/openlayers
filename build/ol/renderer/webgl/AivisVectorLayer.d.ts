@@ -169,17 +169,17 @@ declare class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer<any> {
      * @private
      * @type {Array<import("../../Feature.js").FeatureLike>}
      */
-    private filteredFeatures30k_;
+    private features4Tier1_;
     /**
      * @private
      * @type {Array<import("../../Feature.js").FeatureLike>}
      */
-    private filteredFeatures50k_;
+    private features4Tier2_;
     /**
      * @private
      * @type {Array<import("../../Feature.js").FeatureLike>}
      */
-    private filteredFeatures100k_;
+    private feature4Tier3_;
     /**
      * @private
      * @type {boolean}
@@ -194,7 +194,22 @@ declare class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer<any> {
      * @private
      * @type {number}
      */
-    private previousZoomTier_;
+    private previousZoom_;
+    /**
+     * @private
+     * @type {boolean}
+     */
+    private needsBatchUpdate_;
+    /**
+     * @private
+     * @type {boolean}
+     */
+    private isBatchUpdatePending_;
+    /**
+     * @private
+     * @type {Array<import("../../Feature.js").FeatureLike>}
+     */
+    private currentFeaturesToRender_;
     /**
      * @private
      * @type {number}
@@ -225,13 +240,32 @@ declare class AivisWebGLVectorLayerRenderer extends WebGLLayerRenderer<any> {
      */
     private applyDeclutter_;
     /**
+     * Update batch with features in worker-style async manner
+     * @private
+     * @param {Array<import("../../Feature.js").FeatureLike>} features Features to add to batch
+     * @param {import("../../proj.js").TransformFunction} projectionTransform Transform function
+     * @return {Promise<void>}
+     */
+    private updateBatchAsync_;
+    /**
+     * Process features for current zoom tier in worker-style async manner
+     * Does NOT block prepareFrameInternal - runs completely async
+     * Handles: feature filtering + declutter + batch update + buffer generation
+     * @private
+     * @param {number} currentZoomTier Current zoom tier
+     * @param {import("../../Map.js").FrameState} frameState Frame state
+     * @param {import("../../source/Vector.js").default} vectorSource Vector source
+     */
+    private processFeaturesForZoomTier_;
+    /**
      * @private
      * @param {import("../../source/Vector.js").default} source Source.
      */
     private prepareFilteredFeatures_;
+    features4Tier3_: any[] | undefined;
     /**
      * @private
-     * @param {import("../../Map.js").FrameState} frameState Frame state.
+     * @param {import("../../proj.js").TransformFunction} projectionTransform Transform function.
      */
     private addInitialFeatures_;
     /**
